@@ -48,9 +48,7 @@ class Query:
     def one(self, raise_=False):
         self.limit(1)
         for each in self.all():
-            yield each
-            raise_ = False
-            break
+            return each
 
         if raise_:
             raise NoResultError
