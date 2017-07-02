@@ -44,6 +44,7 @@ def declarative_base():
 
             model_option = ModelOption()
             model_option.table_name = table_name
+            model_option.model = model
 
             for k, v in attrs.items():
                 if isinstance(v, Field):
