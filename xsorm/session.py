@@ -5,9 +5,12 @@ import mysql.connector
 import mysql.connector.pooling
 from mysql.connector import errorcode
 import logging
+from collections import defaultdict
 
-from xsorm import ForeignKey
-from xsorm.query import Query
+from . import ForeignKey
+from .fields import CASCADE
+from .exception import NoResultError
+from .query import Query
 _logger = logging.getLogger('xsorm')
 
 
@@ -135,7 +138,52 @@ class Session:
         return self.query(model).filter(primary == model_object[primary.field]).one(raise_)
 
     def delete(self, model_object):
-        raise NotImplementedError
+        delete_sqls, args = self._delete(model_object)
+        affected_row = 0
+        for each in self._cursor.execute(delete_sqls, args, multi=True):
+            affected_row += each.rowcount
+            _logger.debug(each.statement)
+        # self._cnx.commit()
+        return affected_row
+
+    def _delete(self, model_object, related_dict=None):
+        option = model_object.__model_option__
+        primary = option.primary_key
+        pri_field = primary.field
+        foreign_keys = model_object.__table_rel__[option.table_name]
+        delete_sqls = []
+        args = []
+        if related_dict is None:
+            related_dict = defaultdict(set)
+        related_objects = []
+
+        # 查找所有一级关联的记录
+        for foreign_key in foreign_keys:
+            if foreign_key.on_delete != CASCADE:
+                continue
+            try:
+                related_objects_ = self.query(foreign_key.model).filter(foreign_key == model_object[pri_field]).all()
+                related_objects.extend(related_objects_)
+            except NoResultError:
+                pass
+
+        # 删除对所有一级关联的记录
+        for related_object in related_objects:
+            model_option = related_object.__model_option__
+            table_name = model_option.table_name
+            primary_value = related_object[model_option.primary_key.field]
+            if primary_value not in related_dict[table_name]:
+                related_dict[table_name].add(primary_value)
+                delete_sqls_, args_ = self._delete(related_object, related_dict)
+                delete_sqls.append(delete_sqls_)
+                args.extend(args_)
+
+        # 删除目标记录
+        query = 'DELETE FROM `%s` WHERE `%s` = ?' % (option.table_name, primary.column)
+        query = query.replace('?', '%s')
+        delete_sqls.append(query)
+        args.append(model_object[primary.field])
+        return ';'.join(delete_sqls), args
 
     def query(self, model, *models):
         return Query(self._cursor, model, *models)

@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 from xsorm.exception import DefinitionError
 from xsorm.fields import Field, ForeignKey
+from collections import defaultdict
 
 
 class ModelOption(object):
@@ -27,6 +28,7 @@ def declarative_base():
 
         __models__ = []
         __table_name_models = {}
+        __table_rel__ = defaultdict(list)  # 表名->指向该表的外键
 
         def __new__(mcs, name, bases, attrs):
 
@@ -71,6 +73,10 @@ def declarative_base():
                             raise DefinitionError('One model must have only one primary key field')
                         model_option.primary_key = v
 
+                    # 外键
+                    if isinstance(v, ForeignKey):
+                        mcs.__table_rel__[v.reference.__model_option__.table_name].append(v)
+
                     # 记录在域集中
                     model_option.fields.append(v)
 
@@ -78,6 +84,7 @@ def declarative_base():
                 raise DefinitionError('No primary key is specified for the model %s' % name)
 
             setattr(model, '__model_option__', model_option)
+            setattr(model, '__table_rel__', mcs.__table_rel__)
             return model
 
     class Model(dict, metaclass=_ModelMetaclass):
