@@ -143,7 +143,7 @@ class Session:
         for each in self._cursor.execute(delete_sqls, args, multi=True):
             affected_row += each.rowcount
             _logger.debug(each.statement)
-        # self._cnx.commit()
+        self._cnx.commit()
         return affected_row
 
     def _delete(self, model_object, related_dict=None):
