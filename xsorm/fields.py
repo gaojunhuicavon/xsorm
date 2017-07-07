@@ -24,6 +24,9 @@ class Field(Column, metaclass=ABCMeta):
         self.model = None
         self.field = None
 
+        if not isinstance(self, _IntegerField):
+            self.auto_increment = False
+
 
 class ColumnField(Field, Column):
     @property

@@ -5,9 +5,12 @@ import mysql.connector
 import mysql.connector.pooling
 from mysql.connector import errorcode
 import logging
+from collections import defaultdict
 
-from xsorm import ForeignKey
-from xsorm.query import Query
+from . import ForeignKey
+from .fields import CASCADE
+from .exception import NoResultError
+from .query import Query
 _logger = logging.getLogger('xsorm')
 
 
@@ -23,131 +26,189 @@ class Session:
     def __init__(self, connection):
         self._cnx = connection
         self._cursor = self._cnx.cursor()
+        self._closed = False
 
     def insert(self, model_object):
         """
-        :param model_object: 包含设置了主键
-        :type model_object: xsorm.model.Model
-        :return:
+        利用Model对象在对应的表插入一行记录，没有主动赋值的列将使用default参数设置的默认值，如果default参数为callable，则为生成对象时的
+        执行结果，如果否则就是default的值，default默认为None，及数据库中的NULL，设置为AUTO_INCREMENT的列不会在SQL中指定他的值而是让数
+        据库自动生成。
+        例如：
+        class User(Base):
+            id = IntField(primary_key=True, auto_increment=True)
+            age = IntField()
+            height = IntField(default=lambda: int(time.time()))
+            weight = IntField()
+        user = User(id=1, age=3)
+        row_id = session.insert(user)
+        print(row_id == user.id)  # True
+        等同于执行了SQL：
+        INSERT INTO `user`(`age`, `height`, `weight`) VALUES(3, 1498935425, None)
+        插入成功，如果这个表的有AUTO_INCREMENT的列，将返回这条记录的该列的值，也就是row_id，并且会将该值自动赋值给该对象对应的属性，请参
+        考上面代码中的判断结果。
+        :param model_object: 作为记录的Model对象
+        :return: row_id
         """
         cursor = self._cursor
-        fields = model_object.__fields__
-        escaped_fields = model_object.__escaped_fields__
-        table_name = model_object.__tablename__
-        query = (
-            'INSERT INTO `%s`(%s) VALUES (%s)' %
-            (table_name, escaped_fields, ', '.join(['%s'] * len(fields)))
-        )
+        option = model_object.__model_option__
+        primary = option.primary_key
+        fields = []
         args = []
-        for f in fields:
-            args.append(model_object[f])
-        print(query, args)
+        for field in option.fields:
+            if field.auto_increment:
+                continue
+            args.append(model_object[field.field])
+            fields.append('`%s`' % field.column)
+
+        query = 'INSERT INTO `%s`(%s) VALUES(%s)' % (option.table_name, ', '.join(fields), ', '.join('?' * len(fields)))
+        query = query.replace('?', '%s')
         cursor.execute(query, args)
+        _logger.debug(cursor.statement)
         inserted_id = cursor.lastrowid
         self._cnx.commit()
+        if primary.auto_increment:
+            model_object[primary.field] = inserted_id
         return inserted_id
 
     def insert_many(self, bulk, *model_objects):
-        cursor = self._cursor
-        if not model_objects:
-            return
-        model = None
-        for i in range(1, len(model_objects)):
-            if model_objects[i].__class__ != model_objects[i - 1].__class__:
-                raise TypeError('The model objects must be the instance of the same model')
-            model = model_objects[i].__class__
-        fields = model.__fields__
-        escaped_fields = model.__escaped_fields__
-        placeholder = ', '.join(['?'] * len(fields))
-        for i in range(bulk, len(model_objects), bulk):
-            objects = model_objects[i - bulk:i]
-            placeholders = ', '.join(['(%s)' % placeholder] * len(objects))
-            query = (
-                'INSERT INTO `%s`(%s) VALUES %s' %
-                (model.__tablename__, escaped_fields, placeholders)
-            )
-            args = []
-            for model_object in objects:
-                for field in fields:
-                    args.append(model_object[field])
-            cursor.execute(query, args)
+        raise NotImplementedError
 
-    def update(self, model_object, *fields):
+    def update(self, model_object, *update_fields):
+        """
+        利用Model对象更新数据库记录，该对象必须设置了主键的值，默认情况下会更新该model的所有字段，可以设置update_fields参数来指定需要更新
+        的字段，执行更新后会返回被更新的记录数
+        例如：
+        class User(Base):
+            id = IntField(primary_key=True, auto_increment=True)
+            age = IntField()
+            height = IntField()
+        user = session.query(User).filter(User.id >= 5).one()  # {id: 5, age: 12, height: 165}
+        user.age += 1
+        user.height += 12
+        affected_row = session.update(user)  # UPDATE `user` SET `id` = 5, `age` = 13, `height` = 177 WHERE `id` = 5
+        print(affected_row)  # 1
+        user.age = 1234
+        affected_row = session.update(user, User.age)  # UPDATE `user` SET `age` = 1234 WHERE `id` = 5
+        print(affected_row)  # 1
+        affected_row = session.update(user, User.age)
+        print(affected_row)  # 0, 因为该记录没有变化
+        :param model_object: 设置了主键的Model对象
+        :return: UPDATE语句影响的行数
+        """
         cursor = self._cursor
-        table_name = model_object.__tablename__
-        fields = fields or model_object.__fields__
-        mappings = model_object.__mappings__
-        primary_key = model_object.__primary_key__
+        option = model_object.__model_option__
+        primary = option.primary_key
         set_fields = []
-        for field in fields:
-            set_fields.append('`%s`=?' % mappings[field])
-        set_fields = ', '.join(set_fields)
-        where = []
-        for field in primary_key:
-            where.append('`%s`=?' % field)
-        query = (
-            'UPDATE TABLE `%s` SET %s WHERE %s' %
-            (table_name, set_fields, where)
-        )
         args = []
-        for field in fields:
-            args.append(model_object[field])
-        for field in primary_key:
-            args.append(model_object[field])
-        cursor.execute(query, args)
-        self._cnx.commit()
-
-    def read(self, model_object):
-        cursor = self._cursor
-        escaped_fields = model_object.__escaped_fields__
-        table_name = model_object.__tablename__
-        primary_key = model_object.__primary_key__
-        fields = model_object.__fields__
-        where = []
-        for field in primary_key:
-            where.append('`%s`=?' % field)
-        where = ' and '.join(where)
-        where = where.replace('?', '%s')
+        for field in update_fields or option.fields:
+            set_fields.append('`%s` = ?' % field.column)
+            args.append(model_object[field.field])
+        args.append(model_object[primary.field])
         query = (
-            'SELECT %s FROM `%s` WHERE %s LIMIT 1' %
-            (escaped_fields, table_name, where)
+            'UPDATE `%s` SET %s WHERE `%s` = ?' %
+            (option.table_name, ', '.join(set_fields), primary.column)
         )
-        args = [model_object[f] for f in primary_key]
+        query = query.replace('?', '%s')
         cursor.execute(query, args)
-        result = next(cursor)
-        for field, value in zip(fields, result):
-            model_object[field] = value
+        _logger.debug(cursor.statement)
+        affected_rows = cursor.rowcount
+        self._cnx.commit()
+        return affected_rows
+
+    def read(self, model_object, raise_=False):
+        """
+        获取主键和model_object中的主键相同的行的记录
+        例如：
+        class User(Base):
+            id = IntField(primary_key=True, auto_increment=True)
+            age = IntField()
+        # SELECT `id`, `age` FROM `user` WHERE `id` = 5
+        session.read(User(id=5))  # {'id': 5, 'age': 12}
+        # SELECT `id`, `age` FROM `user` WHERE `id` = 1
+        session.read(User(id=-1)  # None
+        session.read(User(id=-1, True)  # NoResultError
+        :param model_object: 主键赋值了的model object
+        :param raise_: 若为True，则当没有匹配的记录返回时抛出异常NoResultError
+        :return: 一条记录
+        :rtype: Model
+        """
+        option = model_object.__model_option__
+        model = option.model
+        primary = option.primary_key
+        return self.query(model).filter(primary == model_object[primary.field]).one(raise_)
 
     def delete(self, model_object):
-        """
-        删除指定记录
-        :param model_object: 已经为主键赋值的Model对象
-        :type model_object: xsorm.model.Model
-        :return: 影响的行数
-        :rtype: int
-        """
-        cursor = self._cursor
-        primary_key = model_object.__primary_key__
-        where = ','.join([('`%s`=' % field)+'%s' for field in primary_key])
-        query = (
-            'DELETE FROM `%s` WHERE %s' %
-            (model_object.__tablename__, where)
-        )
-        args = [model_object[field] for field in primary_key]
-        cursor.execute(query, args)
-        row_count = cursor.rowcount
+        delete_sqls, args = self._delete(model_object)
+        affected_row = 0
+        for each in self._cursor.execute(delete_sqls, args, multi=True):
+            affected_row += each.rowcount
+            _logger.debug(each.statement)
         self._cnx.commit()
-        return row_count
+        return affected_row
+
+    def _delete(self, model_object, related_dict=None):
+        option = model_object.__model_option__
+        primary = option.primary_key
+        pri_field = primary.field
+        foreign_keys = model_object.__table_rel__[option.table_name]
+        delete_sqls = []
+        args = []
+        if related_dict is None:
+            related_dict = defaultdict(set)
+        related_objects = []
+
+        # 查找所有一级关联的记录
+        for foreign_key in foreign_keys:
+            if foreign_key.on_delete != CASCADE:
+                continue
+            try:
+                related_objects_ = self.query(foreign_key.model).filter(foreign_key == model_object[pri_field]).all()
+                related_objects.extend(related_objects_)
+            except NoResultError:
+                pass
+
+        # 删除对所有一级关联的记录
+        for related_object in related_objects:
+            model_option = related_object.__model_option__
+            table_name = model_option.table_name
+            primary_value = related_object[model_option.primary_key.field]
+            if primary_value not in related_dict[table_name]:
+                related_dict[table_name].add(primary_value)
+                delete_sqls_, args_ = self._delete(related_object, related_dict)
+                delete_sqls.append(delete_sqls_)
+                args.extend(args_)
+
+        # 删除目标记录
+        query = 'DELETE FROM `%s` WHERE `%s` = ?' % (option.table_name, primary.column)
+        query = query.replace('?', '%s')
+        delete_sqls.append(query)
+        args.append(model_object[primary.field])
+        return ';'.join(delete_sqls), args
 
     def query(self, model, *models):
         return Query(self._cursor, model, *models)
 
     def raw(self, sql, *args):
-        pass
+        raise NotImplementedError
 
     def close(self):
+        """
+        关闭Session，关闭后该session不能执行任何其他功能，因为该session所持有的数据库连接已经重新投入到连接池中，提供给其他session使用，
+        不必要每次手动执行close方法，因为每当session脱离了其作用域被gc时，就会自动执行close方法，但是也可以手动执行，用于提前关闭session，
+        从而提前将连接重新投入到连接池
+        """
+        if self._closed:
+            return
         self._cursor.close()
         self._cnx.close()
+        self._closed = True
+
+    def __del__(self):
+        self.close()
+
+    @property
+    def closed(self):
+        return self._closed
 
     def create_all(self, base):
         tables = []
