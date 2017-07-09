@@ -1,7 +1,10 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 import logging
-from .exception import NoResultError
+
+from .exception import NoResultError, JoinError
+from .fields import ForeignKey
+
 _logger = logging.getLogger('xsorm')
 
 
@@ -11,12 +14,29 @@ class Query:
         self._models = models
         self._wheres = []
         self._args = []
+        self._join = []
+        self._on = []
         self._having = []
         self._having_args = []
         self._limit = None
         self._offset = None
         self._order_by = None
         self._group_by = None
+
+    def join(self, model, on=None):
+        self._join.append(model)
+        if on is not None:
+            self._on.append(on)
+        else:
+            for model_ in self._models:
+                for field in model_.__model_option__.fields:
+                    if isinstance(field, ForeignKey) and field.reference == model:
+                        on_ = model_.__model_option__.primary_key == model.__model_option__.primary_key
+                        on = on_ if on is None else on & on_
+            if on is None:
+                raise JoinError('No join condition.')
+            self._on.append(on)
+        return self
 
     def filter(self, operation):
         self._wheres.append(operation.sql)
@@ -56,15 +76,23 @@ class Query:
     def all(self):
         columns = []
         tables = []
+        args = []
+        query = []
+
+        # table references
         for model in self._models:
             model_option = model.__model_option__
             tables.append('`%s`' % model_option.table_name)
             for field in model_option.fields:
                 columns.append(field.full_column_name)
+        table_references = ('(%s)' if len(tables) > 1 and self._join else '%s') % ', '.join(tables)
+        for join, on in zip(self._join, self._on):
+            table_references += ' JOIN `%s` ON %s' % (join.__model_option__.table_name, on.sql)
+            args.extend(on.args)
 
         # 生成query语句和args参数
-        query = ['SELECT %s \nFROM %s' % (', '.join(columns), ', '.join(tables))]
-        args = []
+        query.append('SELECT ' + ', '.join(columns))
+        query.append('FROM ' + table_references)
         if self._wheres:
             query.append('WHERE ' + (' AND '.join(self._wheres)))
             args.extend(self._args)

@@ -12,3 +12,7 @@ class CompareError(Exception):
 
 class NoResultError(Exception):
     pass
+
+
+class JoinError(Exception):
+    pass
