@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 import logging
 
+from functools import reduce
+
 from .exception import NoResultError, JoinError
 from .fields import ForeignKey
 
@@ -28,13 +30,28 @@ class Query:
         if on is not None:
             self._on.append(on)
         else:
-            for model_ in self._models:
-                for field in model_.__model_option__.fields:
-                    if isinstance(field, ForeignKey) and field.reference == model:
-                        on_ = model_.__model_option__.primary_key == model.__model_option__.primary_key
-                        on = on_ if on is None else on & on_
-            if on is None:
+            # 参照表
+            table_rel = model.__table_rel__
+            ons = []
+
+            # model被参照
+            for foreign_key in table_rel[model.__model_option__.table_name]:
+                if foreign_key.model in self._models:
+                    ons.append(foreign_key == model.__model_option__.primary_key)
+
+            # model参照其他
+            for m in self._models:
+                for foreign_key in table_rel[m.__model_option__.table_name]:
+                    if foreign_key.model is model:
+                        ons.append(foreign_key == m.__model_option__.primary_key)
+
+            # 计算出on
+            if not ons:
                 raise JoinError('No join condition.')
+            if len(ons) == 1:
+                on = ons[0]
+            else:
+                on = reduce(lambda x, y: x & y, ons)
             self._on.append(on)
         return self
 
@@ -74,6 +91,7 @@ class Query:
             raise NoResultError
 
     def all(self):
+        mappings = {}
         columns = []
         tables = []
         args = []
@@ -82,9 +100,12 @@ class Query:
         # table references
         for model in self._models:
             model_option = model.__model_option__
-            tables.append('`%s`' % model_option.table_name)
+            if model not in self._join:
+                tables.append('`%s`' % model_option.table_name)
             for field in model_option.fields:
-                columns.append(field.full_column_name)
+                alias = '%s_%s' % (model_option.table_name, field.column)
+                columns.append('%s AS `%s`' % (field.full_column_name, alias))
+                mappings[alias] = field
         table_references = ('(%s)' if len(tables) > 1 and self._join else '%s') % ', '.join(tables)
         for join, on in zip(self._join, self._on):
             table_references += ' JOIN `%s` ON %s' % (join.__model_option__.table_name, on.sql)
@@ -118,10 +139,12 @@ class Query:
         # 组织数据返回
         for row in self._cursor.fetchall():
             model_objects = []
-            for model in self._models:
-                model_option = model.__model_option__
-                model_object = model()
-                for column_data, field in zip(row, model_option.fields):
-                    setattr(model_object, field.field, column_data)
+            cache = {}
+            for each in self._models:
+                model_object = each()
+                cache[each.__model_option__.table_name] = model_object
                 model_objects.append(model_object)
-            yield model_objects[0] if len(model_objects) == 1 else model_objects
+            for alias, field in mappings.items():
+                model_object = cache[field.model.__model_option__.table_name]
+                setattr(model_object, field.field, row[alias])
+            yield model_objects

@@ -186,7 +186,7 @@ class Session:
         return ';'.join(delete_sqls), args
 
     def query(self, model, *models):
-        return Query(self._cursor, model, *models)
+        return Query(self._cnx.cursor(dictionary=True), model, *models)
 
     def raw(self, sql, *args):
         raise NotImplementedError
