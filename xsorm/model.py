@@ -1,17 +1,38 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+from collections import defaultdict
+
 from xsorm.exception import DefinitionError
 from xsorm.fields import Field, ForeignKey
-from collections import defaultdict
 
 
 class ModelOption(object):
-
     def __init__(self):
         self.table_name = None  # 表名
         self.primary_key = None  # 主键的域的信息
+        self.foreign_keys = []  # 所有为外键的域
         self.fields = []  # 所有域信息
         self.model = None  # model类
+
+
+class ObjectCache:
+    def __init__(self):
+        self._cache = defaultdict(dict)
+
+    def cache(self, obj):
+        option = obj.__model_option__
+        table_name = option.table_name
+        primary = obj[option.primary_key]
+        self._cache[table_name][primary] = obj
+
+    def get(self, obj):
+        option = obj.__model_option__
+        table_name = option.table_name
+        primary = obj[option.primary_key]
+        return self._cache[table_name][primary]
+
+    def __contains__(self, obj):
+        return self.get(obj) is None
 
 
 def snake_string(origin_string):
@@ -76,6 +97,7 @@ def declarative_base():
                     # 外键
                     if isinstance(v, ForeignKey):
                         mcs.__table_rel__[v.reference.__model_option__.table_name].append(v)
+                        model_option.foreign_keys.append(v)
 
                     # 记录在域集中
                     model_option.fields.append(v)

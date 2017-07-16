@@ -1,11 +1,9 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 import logging
-
 from functools import reduce
 
 from .exception import NoResultError, JoinError
-from .fields import ForeignKey
 
 _logger = logging.getLogger('xsorm')
 
@@ -136,15 +134,40 @@ class Query:
         self._cursor.execute(query, args)
         _logger.debug(self._cursor.statement)
 
+        results = []
+        cache = {}
+        for each in self._models:
+            cache[each.__model_option__.table_name] = {}
+
         # 组织数据返回
         for row in self._cursor.fetchall():
             model_objects = []
-            cache = {}
+            cache_ = {}
+
+            # 初始化该行记录对应的对象
             for each in self._models:
                 model_object = each()
-                cache[each.__model_option__.table_name] = model_object
+                cache_[each.__model_option__.table_name] = model_object
                 model_objects.append(model_object)
+            # 为对象的对应属性赋值
             for alias, field in mappings.items():
-                model_object = cache[field.model.__model_option__.table_name]
+                model_object = cache_[field.model.__model_option__.table_name]
                 setattr(model_object, field.field, row[alias])
-            yield model_objects
+            # 添加到总的缓存中
+            for model_object in model_objects:
+                model_option = model_object.__model_option__
+                table_name = model_option.table_name
+                primary = model_object[model_option.primary_key.field]
+                cache[table_name][primary] = model_object
+            # 添加到结果中
+            results.append(model_objects)
+
+        # 添加关联
+        for model_objects in results:
+            for model_object in model_objects:
+                for foreign_key in model_object.__model_option__.foreign_keys:
+                    rel_table_name = foreign_key.reference.__model_option__.table_name
+                    val = model_object[foreign_key.field]
+                    model_object[foreign_key.field] = (cache.get(rel_table_name) or {}).get(val, foreign_key.default)
+
+        return results
