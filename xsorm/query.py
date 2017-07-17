@@ -8,13 +8,19 @@ from .exception import NoResultError, JoinError
 _logger = logging.getLogger('xsorm')
 
 
+_JOIN = 0
+_LEFT_JOIN = 1
+
+
 class Query:
     def __init__(self, cursor, *models):
         self._cursor = cursor
         self._models = models
+        self._select_from = None
         self._wheres = []
         self._args = []
         self._join = []
+        self._join_types = []
         self._on = []
         self._having = []
         self._having_args = []
@@ -23,8 +29,25 @@ class Query:
         self._order_by = None
         self._group_by = None
 
+    def select_from(self, model):
+        self._select_from = model
+        return self
+
     def join(self, model, on=None):
+        return self._join_on(model, on, _JOIN)
+
+    def left_join(self, model, on=None):
+        return self._join_on(model, on, _LEFT_JOIN)
+
+    def _join_on(self, model, on, join_type):
+        if not self._select_from:
+            if len(self._models) == 1:
+                self._select_from = self._models[0]
+            else:
+                raise JoinError('Cannot decide which table being joined')
+
         self._join.append(model)
+        self._join_types.append(join_type)
         if on is not None:
             self._on.append(on)
         else:
@@ -34,14 +57,13 @@ class Query:
 
             # model被参照
             for foreign_key in table_rel[model.__model_option__.table_name]:
-                if foreign_key.model in self._models:
+                if foreign_key.model is self._select_from:
                     ons.append(foreign_key == model.__model_option__.primary_key)
 
-            # model参照其他
-            for m in self._models:
-                for foreign_key in table_rel[m.__model_option__.table_name]:
-                    if foreign_key.model is model:
-                        ons.append(foreign_key == m.__model_option__.primary_key)
+            # model参照select from
+            for foreign_key in table_rel[self._select_from.__model_option__.table_name]:
+                if foreign_key.model is model:
+                    ons.append(foreign_key == self._select_from.__model_option__.primary_key)
 
             # 计算出on
             if not ons:
@@ -104,9 +126,12 @@ class Query:
                 alias = '%s_%s' % (model_option.table_name, field.column)
                 columns.append('%s AS `%s`' % (field.full_column_name, alias))
                 mappings[alias] = field
-        table_references = ('(%s)' if len(tables) > 1 and self._join else '%s') % ', '.join(tables)
-        for join, on in zip(self._join, self._on):
-            table_references += ' JOIN `%s` ON %s' % (join.__model_option__.table_name, on.sql)
+        table_references = self._select_from.__model_option__.table_name if self._select_from else ', '.join([each.__model_option__.table_name for each in self._models])
+        for model, join_type, on in zip(self._join, self._join_types, self._on):
+            if join_type == _JOIN:
+                table_references += ' JOIN `%s` ON %s' % (model.__model_option__.table_name, on.sql)
+            else:
+                table_references += ' LEFT JOIN `%s` ON %s' % (model.__model_option__.table_name, on.sql)
             args.extend(on.args)
 
         # 生成query语句和args参数
